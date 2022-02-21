@@ -1,3 +1,4 @@
+import sys
 import cv2
 import numpy as np
 import mediapipe as mp
@@ -6,15 +7,22 @@ import time
 from copy import copy, deepcopy
 import glm
 import math
+from PIL import Image, ImageDraw
 
 from pynput.keyboard import Key, Controller
 keyboard = Controller()
+
+VIDEO_WIDTH = 800
+VIDEO_HEIGHT = 600
+ENABLE_PREVIEW = False
+ENABLE_OVERHEAD_VIEW = False
+
+up = glm.vec3(0.0, 1.0, 1.0)
 
 def calc_forward_vec(left_hip, right_hip):
     l2rhip = right_hip - left_hip
     l2rhip.z = 0.0
     l2rhip = glm.normalize(l2rhip)
-    up = glm.vec3(0.0, 0.0, 1.0)
 
     forward_vec = glm.cross(l2rhip, up)
     forward_vec = glm.normalize(forward_vec)
@@ -26,8 +34,8 @@ def calc_arm_angle(forward_vec, arm_vec):
         forward_vec = copy(forward_vec)
         arm_vec = copy(arm_vec)
 
-        forward_vec.z = 0.0
-        arm_vec.z = 0.0
+        forward_vec.y = 0.0
+        arm_vec.y = 0.0
 
         forward_vec = glm.normalize(forward_vec)
         arm_vec = glm.normalize(arm_vec)
@@ -35,9 +43,8 @@ def calc_arm_angle(forward_vec, arm_vec):
         # Calculate angle between forward and arm
         theta = math.acos(glm.dot(forward_vec, arm_vec))
 
-        plane_normal = glm.vec3(0.0, 0.0, 1.0)
         cross = glm.cross(forward_vec, arm_vec)
-        if glm.dot(plane_normal, cross) < 0:
+        if glm.dot(up, cross) < 0:
             theta = - theta
 
         theta = math.degrees(theta)
@@ -110,21 +117,45 @@ def press_buttons(left_angle, right_angle, button_state):
                 
     # print(f"1: {button_state['x']}")
 
+def draw_overhead_view(poses):
+    world_min = glm.vec3(-0.5, -0.5, -0.5)
+    world_max = glm.vec3(0.5, 0.5, 0.5)
+    world_center = glm.vec3(0.0, 0.0, 0.0)
 
-# I dunno some magic for game input ;)
-#keyboard.press('a')
-#keyboard.release('a')
+    dim = 800
+    pxPerMeter = (world_max - world_min) / dim
+    img = Image.new('RGB', (dim, dim), color = 'black')
+    draw = ImageDraw.Draw(img)
 
+    # print(poses)
+
+    for (name, pose) in poses.items():
+        d = (dim / 2) + ((pose - world_center) * pxPerMeter)
+        draw.ellipse([(d.x - 5, d.z - 5),(d.x + 5, d.z + 5)], fill = 'pink', outline='pink')
+    
+    cvImg = np.array(img) 
+    # Convert RGB to BGR 
+    cvImg = cvImg[:, :, ::-1].copy() 
+    cv2.namedWindow('overhead')
+    cv2.imshow('overhead', cvImg)
+    if cv2.waitKey(1) == 'q':
+        sys.exit()
 
 def main():
-    cap = cv2.VideoCapture(0)
-    # cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
-    width = 800
-    height = 600
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+    print("Init Camera")
 
-    detection_window = 'detection'
+    if sys.platform == 'win32':
+        cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+    else:
+        cap = cv2.VideoCapture(0)
+    
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, VIDEO_WIDTH)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, VIDEO_HEIGHT)
+
+    if cap is None or not cap.isOpened():
+        print("ERROR: Failed to open camera")
+        return 1
+
     annotation_window = 'annotation'
 
     # https://levelup.gitconnected.com/hand-tracking-module-using-python-eb27c8772664
@@ -141,13 +172,15 @@ def main():
 
     first_frame_gray = None
 
-    last_frame = time.time_ns()
+    print("Begin Main Loop")
     done = False
     while not done:
         ret, frame = cap.read()
         if not ret:
-            done = True
-            break
+            print("ERROR: Failed to read frame")
+            continue
+            #done = True
+            #break
         # Output frame to display/annotate
         orig_frame = deepcopy(frame)
 
@@ -184,43 +217,51 @@ def main():
                 continue
 
             forward_vec = calc_forward_vec(poses['left_hip'], poses['right_hip'])
-            left_arm_vec = poses['left_wrist'] - poses['left_shoulder']
-            right_arm_vec = poses['right_wrist'] - poses['right_shoulder']
 
-            left_angle = calc_arm_angle(forward_vec, left_arm_vec)
-            right_angle = calc_arm_angle(forward_vec, right_arm_vec)
+            thresh = 0.2
+            if abs(poses['left_wrist'].x) < thresh and abs(poses['left_wrist'].z) < thresh:
+                left_angle = -180
+            else:
+                left_arm_vec = poses['left_wrist'] - poses['left_shoulder']
+                left_angle = calc_arm_angle(forward_vec, left_arm_vec)
+
+            if abs(poses['right_wrist'].x) < thresh and abs(poses['right_wrist'].z) < thresh:
+                right_angle = -180
+            else:
+                right_arm_vec = poses['right_wrist'] - poses['right_shoulder']
+                right_angle = calc_arm_angle(forward_vec, right_arm_vec)
+
+            print(f"LEFT: {left_angle} RIGHT: {right_angle}")
 
             press_buttons(left_angle, right_angle, button_state)
 
-        # Preview window
-        if pose_results.pose_landmarks is not None:
-            for (mark, id) in landmarks.items():
-                mark_pos = pose_results.pose_landmarks.landmark[id]
+            if ENABLE_OVERHEAD_VIEW:
+                draw_overhead_view(poses)
 
-                height, width, channels = frame.shape
-                x = int(mark_pos.x * width)
-                y = int(mark_pos.y * height)
+        if ENABLE_PREVIEW:
+            # Preview window
+            if pose_results.pose_landmarks is not None:
+                for (mark, id) in landmarks.items():
+                    mark_pos = pose_results.pose_landmarks.landmark[id]
 
-                cv2.circle(frame, (x,y), 10, (255, 0, 255), cv2.FILLED)
+                    height, width, channels = frame.shape
+                    x = int(mark_pos.x * width)
+                    y = int(mark_pos.y * height)
 
-            mp_draw.draw_landmarks(
-                frame,
-                pose_results.pose_landmarks,
-                mp_pose.POSE_CONNECTIONS,
-                landmark_drawing_spec=mp_draw_styles.get_default_pose_landmarks_style()
-            )
+                    cv2.circle(frame, (x,y), 10, (255, 0, 255), cv2.FILLED)
 
-        cv2.namedWindow(annotation_window)
-        cv2.imshow(annotation_window, frame)
+                mp_draw.draw_landmarks(
+                    frame,
+                    pose_results.pose_landmarks,
+                    mp_pose.POSE_CONNECTIONS,
+                    landmark_drawing_spec=mp_draw_styles.get_default_pose_landmarks_style()
+                )
 
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            done = True
+            cv2.namedWindow(annotation_window)
+            cv2.imshow(annotation_window, frame)
 
-        next_frame = last_frame + 30e3
-        to_sleep = next_frame - time.time_ns()
-        if to_sleep > 0:
-            time.sleep(to_sleep * 1e6)
-        last_frame = next_frame
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                done = True
 
 
 if __name__ == '__main__':

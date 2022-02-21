@@ -3,3 +3,4 @@ numpy
 mediapipe
 pynput
 PyGLM
+Pillow
